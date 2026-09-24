@@ -1,31 +1,33 @@
 ---
 name: jev
-description: Toggle and inspect the Jev model router (TypeSafe System One model that picks the cheapest Claude tier per prompt). Use when the user types /jev on, /jev off, /jev status, /jev test <prompt>, or /jev log.
+description: Control the local TypeSafe JEV model router for Claude Code.
 ---
 
-# /jev — Jev model router
+# /jev
 
-The router is a `UserPromptSubmit` hook (`~/.claude/jev-router/route.sh`). When it is ON, every
-non-slash prompt is sent to TypeSafe's Jev, which returns the cheapest Claude tier that can handle
-it (`haiku` / `sonnet` / `opus` / `fable`) plus a probability that the request depends on earlier
-conversation. Self-contained requests below the session model are delegated to a subagent with
-that model; everything else stays in the session. Criteria, thresholds and the session model live
-in `~/.claude/jev-router/config.json`.
+Run the matching local command and report its output. The router is opt-in and
+only sends task text to TypeSafe while enabled (or during an explicit test).
 
-Run exactly one command for the argument the user gave, then report its output in the language
-the user writes in. Do not add commentary beyond the output unless asked.
-
-| Argument | Command |
-|----------|---------|
+| Arguments | Command |
+| --- | --- |
 | `on` | `bash ~/.claude/jev-router/jev.sh on` |
 | `off` | `bash ~/.claude/jev-router/jev.sh off` |
-| `status` (or none) | `bash ~/.claude/jev-router/jev.sh status` |
-| `test <prompt>` | `bash ~/.claude/jev-router/jev.sh test <prompt>` — dry run, prints Jev's decision, never changes the ON/OFF state |
-| `log [n]` | `bash ~/.claude/jev-router/jev.sh log [n]` — last n decisions (default 20) |
+| `status` or empty | `bash ~/.claude/jev-router/jev.sh status` |
+| `log [n]` | `bash ~/.claude/jev-router/jev.sh log [n]` |
+| `debug on` / `debug off` | `bash ~/.claude/jev-router/jev.sh debug on|off` |
+| `test <task>` | `bash ~/.claude/jev-router/jev.sh test <task>` |
 
-Notes for you, the agent:
-- `on` means prompt text leaves the machine (api.typesafe.ai). If the user is about to paste
-  customer data or secrets, remind them once that the router is on.
-- The hook only injects context; you still make the delegation call. When the injected line says
-  DELEGATE, use the Agent tool with the named `model` and a self-contained prompt.
-- The toggle takes effect on the next prompt; no restart needed.
+The router classifies user prompts, direct slash/MCP prompt expansions,
+programmatic Skill calls, and Agent tasks. A `PreToolUse` hook changes the
+`Agent` tool's `model` argument before execution. Inside subagents, the same
+hook also routes any nested Agent task.
+
+For the current conversation, the hook provides a recommendation because
+`UserPromptSubmit` cannot switch the active model. If it recommends a cheaper
+model and the task is independent of the conversation, you may delegate via
+`Agent(model=...)`. Never claim the main model changed merely because the hook
+recommended one. `fable` is a supported Claude Code subagent model alias.
+
+The router skips internal `/jev` invocations and routine file/shell tools.
+Its logs contain short task hashes, not prompt text. A missing key or API
+failure leaves Claude Code's normal behavior intact.
