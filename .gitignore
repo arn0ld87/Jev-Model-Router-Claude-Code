@@ -1,0 +1,5 @@
+# never commit these: your API key, your prompt log, the on/off toggle
+.env
+log.jsonl
+enabled
+.DS_Store

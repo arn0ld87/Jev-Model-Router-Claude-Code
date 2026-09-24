@@ -1,0 +1,24 @@
+{
+  "model": "jev-latest",
+  "max_state_chars": 12000,
+  "min_prompt_chars": 12,
+  "context_threshold": 0.5,
+  "min_confidence": 0.6,
+  "session_model": "opus",
+  "questions": {
+    "route": {
+      "type": "choice",
+      "instructions": "Which Claude model tier is the cheapest one that can complete this coding-agent request well? A subagent starts with a fresh context and reads the files it needs from the repo.",
+      "criteria": {
+        "haiku": "Trivial: find a file or symbol, grep, read and report, list things, a one-line or one-file edit with no design decision, a simple factual question",
+        "sonnet": "Standard implementation: a well-specified feature or fix in a few files, writing or fixing tests, routine refactor, following an existing task list step by step",
+        "opus": "Hard: multi-file refactor with trade-offs, subtle debugging, performance work, architecture or data-model design, reviewing code for correctness",
+        "fable": "Highest stakes or open-ended: security/auth/payment/RLS changes, ambiguous product decisions that need discussion, deep reasoning across the whole codebase, anything asking for judgment or advice rather than execution"
+      }
+    },
+    "needs_context": {
+      "type": "noul",
+      "instructions": "Does completing this request depend on the earlier conversation (it refers to 'this', 'that', 'above', 'what we discussed', 'the same', 'continue', or replies to a question) rather than being self-contained?"
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -x \"$HOME/.claude/jev-router/route.sh\" ] && bash \"$HOME/.claude/jev-router/route.sh\" || true",
+            "timeout": 8,
+            "statusMessage": "Jev: choosing model tier..."
+          }
+        ]
+      }
+    ]
+  }
+}
