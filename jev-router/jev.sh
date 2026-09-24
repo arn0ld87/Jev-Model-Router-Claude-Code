@@ -1,50 +1,83 @@
 #!/usr/bin/env bash
-# CLI behind the /jev skill: toggle the router, inspect it, dry-run a prompt.
+# Control and inspect the installed router. No command exposes the API key.
+set -u
 DIR="${JEV_ROUTER_DIR:-$HOME/.claude/jev-router}"
+CONFIG="$DIR/config.json"
+LOG="$DIR/log.jsonl"
 
+usage() { printf 'usage: jev.sh on|off|status|log [n]|debug on|off|test <task>\n'; }
 case "${1:-status}" in
   on)
+    mkdir -p "$DIR"
     touch "$DIR/enabled"
-    echo "Jev-Router: ON — every prompt in new turns is classified by Jev (prompt text goes to api.typesafe.ai)."
+    printf 'JEV router: ON (task text may be sent to TypeSafe).\n'
     ;;
   off)
     rm -f "$DIR/enabled"
-    echo "Jev-Router: OFF — no prompt leaves the machine."
+    printf 'JEV router: OFF.\n'
     ;;
-  status)
-    if [ -f "$DIR/enabled" ]; then echo "Jev-Router: ON"; else echo "Jev-Router: OFF"; fi
-    [ -x "$DIR/route.sh" ] && echo "route.sh: present" || echo "route.sh: MISSING or not executable ($DIR/route.sh)"
-    echo "session model: $(jq -r '.session_model // "opus"' "$DIR/config.json" 2>/dev/null)"
-    if [ -f "$DIR/log.jsonl" ]; then
-      echo "decisions logged: $(wc -l < "$DIR/log.jsonl" | tr -d ' ')"
-      echo "by tier:"; jq -r '.route' "$DIR/log.jsonl" | sort | uniq -c | sort -rn | sed 's/^/  /'
-      echo "delegated: $(jq -r 'select(.decision=="delegate") | 1' "$DIR/log.jsonl" | wc -l | tr -d ' ')"
-      echo "avg latency ms: $(jq -s 'if length>0 then (map(.ms) | add / length | floor) else 0 end' "$DIR/log.jsonl")"
+  debug)
+    case "${2:-}" in on) value=true;; off) value=false;; *) usage; exit 1;; esac
+    [ -r "$CONFIG" ] || { printf 'Missing config.json\n' >&2; exit 1; }
+    temp=$(mktemp "$DIR/.config.XXXXXXXX") || exit 1
+    if jq --argjson value "$value" '.debug=$value' "$CONFIG" > "$temp"; then
+      chmod 600 "$temp" && mv "$temp" "$CONFIG"
+      printf 'JEV debug: %s\n' "${2}"
+    else
+      rm -f "$temp"
+      exit 1
     fi
     ;;
-  test)
-    shift
-    PROMPT="$*"
-    [ -n "$PROMPT" ] || { echo "usage: jev.sh test <prompt text>"; exit 1; }
-    [ -x "$DIR/route.sh" ] || { echo "route.sh missing"; exit 1; }
-    # Dry run: force the toggle on for this call only, never touching the real state
-    WAS_ON=0; [ -f "$DIR/enabled" ] && WAS_ON=1
-    touch "$DIR/enabled"
-    OUT=$(jq -cn --arg p "$PROMPT" '{prompt:$p}' | bash "$DIR/route.sh")
-    [ "$WAS_ON" = 1 ] || rm -f "$DIR/enabled"
-    if [ -n "$OUT" ]; then
-      printf '%s\n' "$OUT" | jq -r '.hookSpecificOutput.additionalContext'
-    else
-      echo "(no decision — prompt skipped: slash command, too short, router off, or API error)"
+  status)
+    if [ -f "$DIR/enabled" ]; then printf 'JEV router: ON\n'; else printf 'JEV router: OFF\n'; fi
+    [ -r "$CONFIG" ] || { printf 'config.json: missing\n'; exit 0; }
+    jq -r '"session model: \(.session_model // "opus")\ndebug: \(.debug // false)\ncache TTL: \(.cache_ttl_seconds // 30)s"' "$CONFIG"
+    if [ -f "$LOG" ]; then
+      jq -s -r '
+        def count_if(f): map(select(f))|length;
+        def mismatch_count:
+          . as $all |
+          [$all[] | select(.event=="agent_task" and .result=="routed" and (.tool_use_id // "")!="")] as $routes |
+          [$all[] | select(.event=="agent_observed" and (.tool_use_id // "")!="")] as $observed |
+          [$routes[] as $route | $observed[] |
+            select(.tool_use_id==$route.tool_use_id and .selected!="" and .selected!=$route.selected)] | length;
+        "JEV requests: \(count_if(.cache=="miss" or (has("event")|not)))",
+        "cache hits: \(count_if(.cache=="hit"))",
+        "API errors: \(count_if(.result=="error:api" or .result=="error:invalid_response"))",
+        "local skips/errors: \(count_if((.result // "" | startswith("error:")) and .cache!="miss"))",
+        "observed tool-input mismatches: \(mismatch_count)",
+        "average JEV latency: \((map(select(.cache=="miss" and .ms>0)|.ms)|if length>0 then add/length|floor else 0 end)) ms",
+        "JEV requests by event:",
+        (map(select(.cache=="miss" or (has("event")|not)) | .event //= "legacy_user_prompt")|group_by(.event)|map("  \(.[0].event): \(length)")|.[]),
+        "recommendations:",
+        (map(.jev //= (.route // ""))|map(select(.jev!=""))|group_by(.jev)|map("  \(.[0].jev): \(length)")|.[]),
+        "selected Agent models:",
+        (map(select(.event=="agent_task" and .result=="routed"))|group_by(.selected)|map("  \(.[0].selected): \(length)")|.[])
+      ' "$LOG"
+      session=$(jq -r '.session_model // "opus"' "$CONFIG")
+      if [ "$session" = opus ]; then
+        jq -s -r '"estimated avoided Opus Agent calls: \([.[]|select(.event=="agent_task" and .result=="routed" and (.selected=="haiku" or .selected=="sonnet"))]|length) (based on selected tool input, not billed usage)"' "$LOG"
+      fi
     fi
     ;;
   log)
-    N="${2:-20}"
-    [ -f "$DIR/log.jsonl" ] || { echo "no log yet"; exit 0; }
-    tail -n "$N" "$DIR/log.jsonl" | jq -r '"\(.ts)  \(.route | ascii_upcase | .[0:6] | . + "      " | .[0:6])  conf=\(.confidence)  ctx=\(.needs_context)  \(.decision | .[0:8] | . + "        " | .[0:8])  \(.ms)ms  \(.prompt)"'
+    n="${2:-20}"
+    [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -gt 0 ] && [ "$n" -le 500 ] || { usage; exit 1; }
+    [ -f "$LOG" ] || { printf 'No log yet.\n'; exit 0; }
+    jq -s -r --argjson n "$n" '
+      .[-$n:][] |
+      [.ts, (.event // "legacy_user_prompt"), (.task // "legacy"), (.jev // .route // ""), (.selected // ""), (.requested // ""), (.result // .decision // ""), (.cache // ""), ((.ms // 0)|tostring)+"ms"] | @tsv
+    ' "$LOG"
+    ;;
+  test)
+    shift
+    [ "$#" -gt 0 ] || { usage; exit 1; }
+    [ -r "$DIR/route.sh" ] || { printf 'route.sh missing\n' >&2; exit 1; }
+    jq -cn --arg p "$*" '{hook_event_name:"UserPromptSubmit",session_id:"jev-test",prompt:$p}' |
+      JEV_ROUTER_TEST=1 bash "$DIR/route.sh"
     ;;
   *)
-    echo "usage: jev.sh on|off|status|test <prompt>|log [n]"
+    usage
     exit 1
     ;;
 esac

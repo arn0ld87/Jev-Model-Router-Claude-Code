@@ -1,7 +1,15 @@
 {
   "model": "jev-latest",
   "max_state_chars": 12000,
-  "min_prompt_chars": 12,
+  "min_prompt_chars": 1,
+  "cache_ttl_seconds": 30,
+  "debug": false,
+  "enabled_events": {
+    "user_prompt": true,
+    "prompt_expansion": true,
+    "skill_task": true,
+    "agent_task": true
+  },
   "context_threshold": 0.5,
   "min_confidence": 0.6,
   "session_model": "opus",

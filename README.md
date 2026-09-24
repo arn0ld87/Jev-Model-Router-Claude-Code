@@ -1,115 +1,119 @@
-# Jev Model Router für Claude Code
+# JEV Model Router für Claude Code
 
-Ein Hook plus Skill, der für jeden Prompt in Claude Code fragt: **Welches Claude-Modell braucht diese Aufgabe wirklich?** Die Antwort liefert [Jev](https://typesafe.ai) von TypeSafe AI in unter einer halben Sekunde. Liegt die Stufe unter deinem Session-Modell und ist die Aufgabe in sich geschlossen, gibt Claude sie an einen Subagenten mit dem günstigeren Modell.
+Der Router fragt [TypeSafe JEV](https://typesafe.ai) an sinnvollen Task-Grenzen nach einem Modell. Normale Prompts, direkte Slash-/MCP-Prompt-Erweiterungen, programmatische Skill-Aufrufe und `Agent`-Aufgaben werden getrennt behandelt. Bei `Agent`-Aufrufen setzt ein `PreToolUse`-Hook das `model`-Argument vor der Ausführung auf die JEV-Empfehlung. Für das Hauptgespräch kann ein Hook nur Kontext mit einer Empfehlung liefern; er kann dessen Modell nicht selbst umschalten.
 
-Begleitmaterial zum Video „Jev + Claude Code: 3 Use Cases".
+## Ereignisse und Wirkung
 
-## Wie es funktioniert
+| Claude-Code-Ereignis | JEV-Aufruf? | Wirkung |
+| --- | --- | --- |
+| `UserPromptSubmit` | Ja, für normale Nutzereingaben | Modell-Empfehlung als `additionalContext`; gegebenenfalls Delegationsempfehlung |
+| `UserPromptExpansion` | Ja, für direkt eingegebene Skills, Slash-Commands und MCP-Prompts | Modell-Empfehlung für die expandierte Aufgabe |
+| `PreToolUse` mit `Skill` | Ja, bei von Claude gestarteten Skills | Empfehlung für den Skill-Task |
+| `PreToolUse` mit `Agent` | Ja, für jeden neuen Agent-Task, auch innerhalb eines Subagenten | `updatedInput.model` setzt das konkrete Agent-Modell |
+| `PostToolUse` mit `Agent` | Nein | Protokolliert den vom Hook beobachteten Tool-Input |
+| `SubagentStart` | Nein | Protokolliert Start und Agent-Typ; der Task-Prompt ist hier nicht verfügbar |
+| `SubagentStop` | Nein | Abschlussereignis ohne neue Modellentscheidung |
+| `TaskCreated`/`TaskCompleted` | Nein | Betreffen `TaskCreate`/`TaskUpdate`, nicht jeden LLM-Task oder Agent-Start |
+| `PreModelSwitch`/`PostModelSwitch` | Nein | Beobachten bzw. blockieren Session-Modellwechsel, wählen kein Modell für einen Task |
+| `Read`, `Edit`, `Write`, `Glob`, `Grep`, `Bash` | Nein | Primitive Tools innerhalb eines bereits laufenden Tasks |
 
-1. Ein `UserPromptSubmit`-Hook (`jev-router/route.sh`) schickt den Text deines Prompts an Jev.
-2. Jev beantwortet zwei typisierte Fragen: die günstigste Stufe (`haiku` / `sonnet` / `opus` / `fable`) und die Wahrscheinlichkeit, dass die Aufgabe vom bisherigen Gespräch abhängt.
-3. Der Hook blendet Claude eine Zeile ein: `DELEGATE` (Subagent mit dem genannten Modell) oder `handle` (in der Session bleiben).
-4. Der Skill `/jev` schaltet den Router ein und aus und zeigt dir seine Entscheidungen.
+Diese Aussagen entsprechen der [aktuellen Hook-Referenz](https://code.claude.com/docs/en/hooks) und der [Subagent-Modellreihenfolge](https://code.claude.com/docs/en/sub-agents). `UserPromptExpansion` liefert den ursprünglichen Befehl und dessen Argumente, nicht den vollständig expandierten Skill-Text. Bei programmatisch aufgerufenen Skills liefert `PreToolUse` die Skill-Argumente. Deshalb klassifiziert JEV diese Aufgaben anhand des Befehls und der verfügbaren Argumente.
 
-**Was an TypeSafe geht:** nur der Text deines Prompts (max. 12.000 Zeichen). Keine Dateien, kein Code, kein Gesprächsverlauf. Der Router ist fail-open: Antwortet Jev nicht innerhalb von 5 Sekunden, läuft dein Prompt unverändert durch.
+Ein direkt eingegebener Slash-Command wird erst bei `UserPromptExpansion` bewertet. So laufen eingebaute Steuerbefehle, die keinen Prompt expandieren, nicht durch JEV. `/jev` ist ausdrücklich ausgenommen, damit Status, Log und Umschalten den Router nicht rekursiv auslösen.
 
-## Voraussetzungen
+## Agenten und verschachtelte Tasks
 
-- Claude Code
-- `jq` und `curl` (Mac: `brew install jq`, curl ist vorinstalliert)
-- Ein API-Key von [console.typesafe.ai](https://console.typesafe.ai) (neue Accounts bekommen Startguthaben)
+```text
+User: "Prüfe die Anmeldung"        → UserPromptSubmit → JEV empfiehlt opus
+  Agent("Finde Auth-Tests")         → PreToolUse Agent → JEV wählt haiku
+    Agent("Ergänze fehlende Tests") → PreToolUse Agent → JEV wählt sonnet
+```
 
-## Installation
+Das zweite `Agent`-Ereignis wird auch im Subagenten durch denselben Hook erfasst. `updatedInput` übernimmt die übrigen Tool-Parameter unverändert und ersetzt nur `model`, sofern JEVs Konfidenz mindestens `min_confidence` erreicht. Bei niedrigerer Konfidenz bleibt der ursprüngliche Agent-Aufruf bestehen. Der Hook gibt keine `permissionDecision: "allow"` zurück, damit Claude Codes normale Berechtigungsprüfung erhalten bleibt. Ein identischer Task innerhalb der Cache-TTL nutzt die erste JEV-Antwort erneut.
 
-Repo klonen, dann Claude Code **in dem geklonten Ordner** starten und diesen Prompt einfügen:
+Das Hauptgespräch behält sein bereits gewähltes Modell. Wenn JEV ein günstigeres Modell mit hinreichender Konfidenz und geringer Kontextabhängigkeit empfiehlt, erhält Claude eine Delegationsempfehlung. Ob es delegiert, bleibt bei Claude. Das ist die technische Grenze von `UserPromptSubmit`.
+
+## Installation und Upgrade
+
+Voraussetzungen: Claude Code, Bash, `jq`, `curl`, `shasum` und ein TypeSafe-API-Key. Auf macOS: `brew install jq`. Prüfe, ob deine Claude-Code-Version die genannten Hook-Ereignisse und `PreToolUse.updatedInput` unterstützt.
 
 ```bash
-git clone https://github.com/AlexPEClub/Jev-Model-Router-Claude-Code-.git jev-model-router
-cd jev-model-router
-claude
+git clone https://github.com/arn0ld87/Jev-Model-Router-Claude-Code.git
+cd Jev-Model-Router-Claude-Code
+bash install.sh
 ```
 
-```
-Richte mir den Jev Model Router aus diesem Repo ein. Kopiere die Dateien exakt,
-ohne den Inhalt zu verändern:
+`install.sh` legt die Skripte unter `~/.claude/jev-router/` und den Skill unter `~/.claude/skills/jev/` ab. Es ergänzt die Hook-Konfiguration in `~/.claude/settings.json` und entfernt nur alte JEV-Router-Hook-Einträge, bevor es die neuen einträgt. Andere Hooks und Einstellungen bleiben erhalten. Bei einem Upgrade werden vorhandene Skripte, Skill, Konfiguration und Settings mit Zeitstempel gesichert. Die bestehende `.env`, `log.jsonl`, der Cache und der `enabled`-Status bleiben erhalten. In älteren Standardkonfigurationen wird `min_prompt_chars: 12` auf `1` migriert; andere Werte bleiben bestehen. Die Installation schaltet JEV nicht automatisch ein.
 
-1. jev-router/route.sh    → ~/.claude/jev-router/route.sh   (ausführbar machen)
-2. jev-router/jev.sh      → ~/.claude/jev-router/jev.sh     (ausführbar machen)
-3. jev-router/config.json → ~/.claude/jev-router/config.json
-4. skills/jev/SKILL.md    → ~/.claude/skills/jev/SKILL.md
-5. Den Hook-Block aus hook-settings.json in ~/.claude/settings.json unter
-   hooks.UserPromptSubmit ERGÄNZEN, ohne bestehende Hooks oder andere
-   Einstellungen zu überschreiben. Existiert die Datei noch nicht, lege sie an.
+Ältere `log.jsonl`-Einträge können noch die früher protokollierten ersten 120 Prompt-Zeichen enthalten. Das Upgrade bewahrt diese Einträge, setzt die Dateiberechtigung auf `600` und zeigt sie im neuen `/jev log` nicht an. Prüfe oder entferne die alte Logdatei selbst, wenn sie vertrauliche Alt-Daten enthält.
 
-Danach:
-- Frag mich, welches Modell meine Claude-Code-Session normalerweise nutzt
-  (haiku, sonnet, opus oder fable), und trage es in ~/.claude/jev-router/config.json
-  als "session_model" ein.
-- Prüfe, ob jq und curl installiert sind. Falls jq fehlt, nenn mir den
-  Installationsbefehl für mein System.
-- Prüfe, ob TYPESAFE_API_KEY in meiner Umgebung gesetzt ist. Falls nicht, sag mir,
-  dass ich den Key selbst in die Datei ~/.claude/jev-router/.env als Zeile
-  TYPESAFE_API_KEY=... eintragen soll (Datei mit chmod 600 schützen).
-  Schreib den Key niemals selbst in eine Datei.
-- Schalte den Router NICHT ein (keine Datei "enabled" anlegen). Das mache ich
-  selbst mit /jev on.
-- Zum Schluss: bash ~/.claude/jev-router/jev.sh test "Wo wird in diesem Projekt
-  der Supabase-Client initialisiert?" ausführen und mir die Ausgabe zeigen.
+Lege den Key selbst in der Umgebung oder in `~/.claude/jev-router/.env` ab:
+
+```text
+TYPESAFE_API_KEY=...
 ```
 
-Wenn Claude fertig ist: Claude Code einmal beenden und neu starten, damit der Hook und der Skill `/jev` geladen werden.
+Schütze die Datei mit `chmod 600 ~/.claude/jev-router/.env`. Der Router liest eine `.env` mit anderen Berechtigungen nicht ein. API-Key und Task-Payload werden nicht als Argumente an `curl` übergeben. Starte Claude Code nach der Installation neu, damit die neuen Hooks und der Skill geladen werden.
 
-## Benutzen
+## Bedienung
 
+| Befehl | Wirkung |
+| --- | --- |
+| `/jev on` | Aktiviert die JEV-Anfragen; Task-Text kann an TypeSafe gehen |
+| `/jev off` | Deaktiviert den Router |
+| `/jev status` | Zähler, Verteilung, Cache, Fehler, Latenz und ausgewählte Agent-Modelle |
+| `/jev log 20` | Letzte Ereignisse mit Task-Hash, Empfehlung, Modell und Ergebnis |
+| `/jev debug on` / `off` | Fügt Hook-Kontext zu Empfehlung, Konfidenz, Cache und Latenz hinzu |
+| `/jev test <Task>` | Klassifiziert einen Test-Task ohne den Aktivierungsstatus zu ändern |
+
+Die CLI ist auch direkt mit `bash ~/.claude/jev-router/jev.sh <Befehl>` verfügbar. `/jev test` sendet den angegebenen Text auch dann an TypeSafe, wenn der Router ausgeschaltet ist.
+
+## Konfiguration
+
+`~/.claude/jev-router/config.json` enthält:
+
+| Feld | Standard | Bedeutung |
+| --- | --- | --- |
+| `enabled_events` | alle vier Task-Ereignisse aktiv | Schaltet Prompt-, Expansion-, Skill- und Agent-Routing einzeln |
+| `cache_ttl_seconds` | `30` | Wiederverwendung identischer Tasks derselben Session |
+| `max_state_chars` | `12000` | Maximale Länge des Task-Texts im JEV-Request; harte Obergrenze ebenfalls 12000 |
+| `min_prompt_chars` | `1` | Mindestlänge; kurze Eingaben wie „teste“ laufen durch JEV |
+| `session_model` | `opus` | Fallback für die Delegationsempfehlung des Hauptgesprächs |
+| `context_threshold`, `min_confidence` | `0.5`, `0.6` | Schwellen für die Delegationsempfehlung; `min_confidence` gilt auch für Agent-Modelländerungen |
+| `debug` | `false` | Ausführlicher Hook-Kontext |
+| `model`, `questions` | siehe Datei | JEV-Version und Routing-Kriterien |
+
+Der Cache-Schlüssel enthält Session-ID und Task-Text; Ereignistypen teilen sich damit Treffer für denselben Task. Ein User-Prompt, der unmittelbar mit identischem Text an `Agent` geht, verursacht nur eine JEV-Anfrage. Der Cache speichert nur Modell, Konfidenz und Kontextabhängigkeit, nicht den Task-Text.
+
+## Daten, Fehler und Beobachtbarkeit
+
+An TypeSafe gehen der gekürzte Task-Text, Ereignistyp, Agent-Typ, vom Agent angefragtes Modell und das konfigurierte Session-Modell. Die Prompt- und Tool-Hooks liefern das tatsächlich aktive Hauptmodell und den Parent-Task nicht zuverlässig; diese Werte werden deshalb nicht vorgetäuscht. Es gehen keine Dateien, Transkripte oder kompletter Sourcecode automatisch mit. Wenn der Task selbst Code oder sensible Daten enthält, können diese im Task-Text stehen. Eine konservative Erkennung überspringt erkennbare Zugangsdaten; sie kann nicht jedes Geheimnis erkennen. Nutze `/jev off` für vertrauliche Arbeit.
+
+`log.jsonl` enthält Zeit, Ereignis, kurzen SHA-256-Task-Hash, JEV-Empfehlung, ausgewähltes Modell, Cache-Status, Latenz und Fehlerart. Es speichert keine Prompt-Texte, API-Antworten oder Keys. `/jev status` zählt JEV-Anfragen nach Ereignistyp, Cache-Treffer, Empfehlungen, ausgewählte Agent-Modelle, API-Fehler und mittlere Latenz. Falls Claude Code für `PreToolUse` und `PostToolUse` dieselbe `tool_use_id` meldet, zählt es außerdem Abweichungen zwischen `updatedInput.model` und dem später beobachteten Tool-Input. „Vermiedene Opus-Aufrufe“ ist eine Schätzung aus den vom Hook ausgewählten Agent-Modellen, keine Abrechnungszahl.
+
+Ein `PostToolUse`-Hook sieht den Tool-Input, aber nicht zwingend das tatsächlich abgerechnete Modell. Claude Code kann bei `availableModels`-Regeln ein Modell ersetzen; `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` kann pro Aufruf gewählte Modelle übergehen. Den wirklichen Subagent-Modellnamen zeigt Claude Code in `/tasks` (unterstützte Versionen). Deshalb bezeichnet das Log `selected` als Hook-Entscheidung und `observed_tool_input` als beobachteten Tool-Input; es behauptet keine Billing-Wahrheit.
+
+Bei fehlendem Key, unsicherer `.env`, Timeout, HTTP-Fehler, ungültiger Antwort oder Cache-Schreibfehler läuft Claude Code normal weiter. Der Router protokolliert erkennbare Fehler ohne Task-Text. Er setzt `JEV_ROUTER_ACTIVE=1` als Reentrancy-Guard. Die Hook-Timeouts sind auf acht Sekunden gesetzt, der API-Timeout auf fünf Sekunden.
+
+## Tests
+
+```bash
+bash tests/test-router.sh
+bash tests/test-install.sh
+bash -n jev-router/*.sh install.sh tests/*.sh
 ```
-/jev on
-```
 
-Danach ganz normal arbeiten. Bei jedem Prompt, den Jev als delegierbar einstuft, startet Claude seine Antwort mit `→ haiku (Jev)` und gibt die Aufgabe an einen Subagenten mit diesem Modell. Bleibt die Aufgabe in der Session, beginnt die Antwort mit `→ opus (Jev: haiku, ctx 0.89)`, du siehst also immer, was Jev empfohlen hat und warum es trotzdem in der Session blieb.
+Die Tests verwenden einen lokalen `curl`-Mock und senden keine API-Anfragen. Sie prüfen normale und kurze Prompts, Slash-Commands, Agenten, verschachtelte Agenten, Cache, primitive Tools, Fehlerfälle, Log-Datenschutz sowie eine wiederholte Migration. Falls `shellcheck` installiert ist: `shellcheck jev-router/*.sh install.sh tests/*.sh`.
 
-| Befehl | Was er tut |
-|--------|------------|
-| `/jev on` | Router einschalten (Prompt-Text geht ab jetzt an api.typesafe.ai) |
-| `/jev off` | Router ausschalten, nichts verlässt mehr die Maschine |
-| `/jev status` | An/Aus, Session-Modell, Verteilung nach Stufe, Anzahl Delegationen, mittlere Latenz |
-| `/jev test <Prompt>` | Trockenlauf: Jevs Entscheidung sehen, ohne etwas zu verändern |
-| `/jev log 20` | Die letzten 20 Entscheidungen |
+## Dateien
 
-Slash-Commands und Prompts unter 12 Zeichen werden nie klassifiziert.
-
-## Anpassen
-
-Alles Einstellbare liegt in `~/.claude/jev-router/config.json`:
-
-| Feld | Bedeutung | Standard |
-|------|-----------|----------|
-| `session_model` | Das Modell deiner Session. Delegiert wird nur an Stufen darunter. | `opus` |
-| `min_confidence` | Unter dieser Konfidenz bleibt die Aufgabe in der Session | `0.6` |
-| `context_threshold` | Ab dieser Wahrscheinlichkeit für „hängt vom Gespräch ab" bleibt die Aufgabe in der Session | `0.5` |
-| `questions.route.criteria` | Die Beschreibung der vier Stufen. Hier schärfst du nach, wenn Jev zu oft oder zu selten delegiert. | siehe Datei |
-| `model` | Jev-Version. Nach dem Kalibrieren der Schwellen auf eine feste Version pinnen. | `jev-latest` |
-
-## Ehrliche Einschränkungen
-
-- Der Hook blendet nur die Entscheidung ein. Die Delegation macht Claude selbst. In der Praxis hält sich Claude daran, garantiert ist es nicht. Wer das hart erzwingen will, findet in [gargpratyush/jev-router](https://github.com/gargpratyush/jev-router) einen Proxy-Ansatz, der das Modell wirklich austauscht.
-- Subagenten starten mit frischem Kontext. Deshalb die zweite Frage an Jev: Hängt die Aufgabe vom Gespräch ab? Wenn ja, bleibt sie im Session-Modell.
-- Ob die Ersparnis für deine Arbeit passt, musst du selbst messen. `/jev status` und `/jev log` zeigen dir die Datenbasis.
-- `~/.claude/jev-router/log.jsonl` enthält die ersten 120 Zeichen jedes klassifizierten Prompts. Nicht teilen, nicht committen.
-- Datenschutz: Dein Prompt-Text geht an einen US-Anbieter. Für Arbeit mit Kundendaten gilt dieselbe Prüfung wie bei jedem anderen KI-Dienst, siehe [docs.typesafe.ai/legal](https://docs.typesafe.ai/legal). Im Zweifel `/jev off`.
-
-## Dateien in diesem Repo
-
-```
-jev-router/route.sh      der Hook (bash + curl + jq)
-jev-router/jev.sh        das CLI hinter /jev
-jev-router/config.json   Modell, Schwellen, Kriterien
-skills/jev/SKILL.md      der Skill
-hook-settings.json       der Block für ~/.claude/settings.json
-```
-
-## Links
-
-- TypeSafe Console: https://console.typesafe.ai
-- TypeSafe Doku: https://docs.typesafe.ai
-- Offizieller TypeSafe-Skill für Claude Code: https://github.com/typesafe-ai/skills
-- Claude-Code-Hooks-Referenz: https://code.claude.com/docs/en/hooks
+| Datei | Aufgabe |
+| --- | --- |
+| `jev-router/route.sh` | Kleiner Hook-Einstieg und Reentrancy-Guard |
+| `jev-router/router-core.sh` | Zentrale JEV-Abfrage, Cache, Modellwahl und Logging |
+| `jev-router/jev.sh` | `/jev`-CLI |
+| `jev-router/config.json` | Routing-Regeln und Konfiguration |
+| `hook-settings.json` | Hook-Einträge für Claude Code |
+| `skills/jev/SKILL.md` | Bedienung über `/jev` |
+| `install.sh` | Upgrade und Migration |
+| `tests/` | Reproduzierbare Offline-Tests |

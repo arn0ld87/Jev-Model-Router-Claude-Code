@@ -1,16 +1,9 @@
 {
   "hooks": {
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ -x \"$HOME/.claude/jev-router/route.sh\" ] && bash \"$HOME/.claude/jev-router/route.sh\" || true",
-            "timeout": 8,
-            "statusMessage": "Jev: choosing model tier..."
-          }
-        ]
-      }
-    ]
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash \"$HOME/.claude/jev-router/route.sh\"", "timeout": 8}]}],
+    "UserPromptExpansion": [{"hooks": [{"type": "command", "command": "bash \"$HOME/.claude/jev-router/route.sh\"", "timeout": 8}]}],
+    "PreToolUse": [{"matcher": "Agent|Skill", "hooks": [{"type": "command", "command": "bash \"$HOME/.claude/jev-router/route.sh\"", "timeout": 8}]}],
+    "PostToolUse": [{"matcher": "Agent", "hooks": [{"type": "command", "command": "bash \"$HOME/.claude/jev-router/route.sh\"", "timeout": 8}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "bash \"$HOME/.claude/jev-router/route.sh\"", "timeout": 8}]}]
   }
 }
